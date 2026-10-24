@@ -26,6 +26,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.service.notification.NotificationListenerService
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.KeyEvent
@@ -757,3 +758,9 @@ class MainActivity : Activity() {
 
     override fun onBackPressed() { /* this is the home screen: Back does nothing */ }
 }
+
+/**
+ * Intentionally empty. Having this enabled is what lets the launcher read the active media
+ * session (Spotify now-playing). It never reads notification contents.
+ */
+class MediaListener : NotificationListenerService()
