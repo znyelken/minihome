@@ -94,10 +94,12 @@ class MainActivity : Activity() {
             format12Hour = "EEEE d MMMM"; format24Hour = "EEEE d MMMM"
             textSize = 18f; setTextColor(0xCCFFFFFF.toInt()); gravity = Gravity.END
         }
+        date.setSingleLine(true)
         val clockBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            gravity = Gravity.END
             addView(clock, LinearLayout.LayoutParams(WRAP, WRAP))
-            addView(date, LinearLayout.LayoutParams(MATCH, WRAP))
+            addView(date, LinearLayout.LayoutParams(WRAP, WRAP))
         }
         root.addView(clockBox, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END).apply {
             topMargin = dp(40); rightMargin = dp(64)
@@ -123,7 +125,7 @@ class MainActivity : Activity() {
             addView(dock, FrameLayout.LayoutParams(WRAP, WRAP))
         }
         root.addView(scroll, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
-            bottomMargin = dp(48); leftMargin = dp(64); rightMargin = dp(64)
+            bottomMargin = dp(48); leftMargin = dp(32); rightMargin = dp(32)
         })
 
         setContentView(root)
@@ -144,7 +146,7 @@ class MainActivity : Activity() {
     }
 
     private fun tile(label: String, icon: Drawable?, glyph: String?, go: () -> Unit): View {
-        val size = dp(84)
+        val size = dp(66)
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -175,19 +177,20 @@ class MainActivity : Activity() {
         }
         box.addView(img, LinearLayout.LayoutParams(size, size))
         val name = TextView(this).apply {
-            text = label; textSize = 14f; setTextColor(Color.WHITE)
+            text = label; textSize = 12f; setTextColor(Color.WHITE)
             maxLines = 1; gravity = Gravity.CENTER; alpha = 0f
+            ellipsize = android.text.TextUtils.TruncateAt.END
             setPadding(0, dp(6), 0, 0)
         }
-        box.addView(name, LinearLayout.LayoutParams(size + dp(24), WRAP))
+        box.addView(name, LinearLayout.LayoutParams(size, WRAP))
         box.setOnFocusChangeListener { v, focused ->
-            val s = if (focused) 1.18f else 1f
+            val s = if (focused) 1.12f else 1f
             v.animate().scaleX(s).scaleY(s).setDuration(120).start()
             name.animate().alpha(if (focused) 1f else 0f).setDuration(120).start()
         }
         box.setOnClickListener { go() }
         box.layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply {
-            leftMargin = dp(10); rightMargin = dp(10)
+            leftMargin = dp(4); rightMargin = dp(4)
         }
         return box
     }
