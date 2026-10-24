@@ -3,6 +3,7 @@ package com.zeynep.minilauncher
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.Dialog
+import android.app.usage.UsageStatsManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -13,6 +14,7 @@ import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
@@ -21,6 +23,9 @@ import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
+import android.media.tv.TvContract
+import android.media.tv.TvInputManager
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -83,6 +88,36 @@ private class Glyph(ctx: Context, var kind: Int) : View(ctx) {
                 c.drawRoundRect(cx - s * 0.18f, cy - s * 0.2f, cx - s * 0.06f, cy + s * 0.2f, s * 0.02f, s * 0.02f, p)
                 c.drawRoundRect(cx + s * 0.06f, cy - s * 0.2f, cx + s * 0.18f, cy + s * 0.2f, s * 0.02f, s * 0.02f, p)
             }
+            6 -> { // search
+                p.style = Paint.Style.STROKE; p.strokeWidth = s * 0.075f; p.strokeCap = Paint.Cap.ROUND
+                c.drawCircle(cx - s * 0.04f, cy - s * 0.04f, s * 0.17f, p)
+                c.drawLine(cx + s * 0.09f, cy + s * 0.09f, cx + s * 0.24f, cy + s * 0.24f, p)
+            }
+            7 -> { // home
+                val t = Path().apply {
+                    moveTo(cx, cy - s * 0.26f); lineTo(cx + s * 0.28f, cy - s * 0.02f); lineTo(cx + s * 0.2f, cy - s * 0.02f)
+                    lineTo(cx + s * 0.2f, cy + s * 0.24f); lineTo(cx - s * 0.2f, cy + s * 0.24f); lineTo(cx - s * 0.2f, cy - s * 0.02f)
+                    lineTo(cx - s * 0.28f, cy - s * 0.02f); close()
+                }
+                c.drawPath(t, p)
+            }
+            8 -> { // for you: four-point sparkle
+                val t = Path().apply {
+                    moveTo(cx, cy - s * 0.28f); lineTo(cx + s * 0.07f, cy - s * 0.07f); lineTo(cx + s * 0.28f, cy)
+                    lineTo(cx + s * 0.07f, cy + s * 0.07f); lineTo(cx, cy + s * 0.28f); lineTo(cx - s * 0.07f, cy + s * 0.07f)
+                    lineTo(cx - s * 0.28f, cy); lineTo(cx - s * 0.07f, cy - s * 0.07f); close()
+                }
+                c.drawPath(t, p)
+            }
+            9 -> { // inputs: little TV
+                p.style = Paint.Style.STROKE; p.strokeWidth = s * 0.07f; p.strokeCap = Paint.Cap.ROUND
+                c.drawRoundRect(cx - s * 0.26f, cy - s * 0.2f, cx + s * 0.26f, cy + s * 0.1f, s * 0.04f, s * 0.04f, p)
+                c.drawLine(cx - s * 0.12f, cy + s * 0.22f, cx + s * 0.12f, cy + s * 0.22f, p)
+            }
+            10 -> { // account: person
+                c.drawCircle(cx, cy - s * 0.1f, s * 0.1f, p)
+                c.drawArc(RectF(cx - s * 0.2f, cy + s * 0.04f, cx + s * 0.2f, cy + s * 0.44f), 180f, 180f, true, p)
+            }
             5 -> { // next
                 c.drawRect(cx + s * 0.16f, cy - s * 0.2f, cx + s * 0.22f, cy + s * 0.2f, p)
                 val t = Path().apply { moveTo(cx - s * 0.22f, cy - s * 0.2f); lineTo(cx - s * 0.22f, cy + s * 0.2f); lineTo(cx + s * 0.12f, cy); close() }
@@ -91,6 +126,9 @@ private class Glyph(ctx: Context, var kind: Int) : View(ctx) {
         }
     }
 }
+
+private class WnItem(val title: String, val art: String?, val intentUri: String?, val pkg: String?)
+private class RecentApp(val pkg: String, val label: String, val icon: Drawable?)
 
 class MainActivity : Activity() {
 
@@ -123,6 +161,17 @@ class MainActivity : Activity() {
     private var idx = 0
     private var allDialog: Dialog? = null
     private var moving: View? = null
+
+    // left rail + For You page
+    private var page = 0
+    private lateinit var forYou: LinearLayout
+    private lateinit var wnHeader: TextView
+    private lateinit var wnScroll: HorizontalScrollView
+    private lateinit var wnRow: LinearLayout
+    private lateinit var recRow: LinearLayout
+    private lateinit var homeBg: GradientDrawable
+    private lateinit var forBg: GradientDrawable
+    private val wnImages = ArrayList<ImageView>()
 
     // now playing
     private lateinit var nowCard: LinearLayout
@@ -234,10 +283,34 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_HORIZONTAL
             addView(nowCard, LinearLayout.LayoutParams(dp(560), WRAP).apply { bottomMargin = dp(18) })
             addView(scroll, LinearLayout.LayoutParams(WRAP, WRAP))
+            addView(buildForYou(), LinearLayout.LayoutParams(dp(768), WRAP))
         }
         root.addView(bottom, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
-            bottomMargin = dp(40); leftMargin = dp(32); rightMargin = dp(32)
+            bottomMargin = dp(40); leftMargin = dp(120); rightMargin = dp(32)
         })
+
+        // Left rail
+        val acc = railItem(10, "Account") { openAccounts() }
+        val srch = railItem(6, "Search") { openSearch() }
+        val home = railItem(7, "Home") { setPage(0) }
+        val fy = railItem(8, "For you") { setPage(1) }
+        val inp = railItem(9, "Inputs") { showInputs() }
+        val set = railItem(1, "Settings") { openSettings() }
+        homeBg = home.second
+        forBg = fy.second
+        val rail = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(8), dp(14), dp(8), dp(14))
+            clipChildren = false
+            background = GradientDrawable().apply { setColor(0x66101014); cornerRadius = dp(36).toFloat() }
+            addView(acc.first); addView(srch.first); addView(home.first)
+            addView(fy.first); addView(inp.first); addView(set.first)
+        }
+        root.addView(rail, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.START or Gravity.CENTER_VERTICAL).apply {
+            leftMargin = dp(24)
+        })
+        updateRailActive()
 
         setContentView(root)
     }
@@ -257,11 +330,6 @@ class MainActivity : Activity() {
         val all = tile("All apps", null, 0) { allApps(null) }
         all.setOnLongClickListener { addPicker(); true }
         dock.addView(all)
-        val set = tile("Settings", null, 1) {
-            startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        }
-        set.setOnLongClickListener { addPicker(); true }
-        dock.addView(set)
         if (focusIdx >= 0) dock.post {
             dock.getChildAt(minOf(focusIdx, dock.childCount - 1))?.requestFocus()
         }
@@ -731,6 +799,285 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    // ---------------------------------------------------------------- left rail
+    private fun railItem(kind: Int, label: String, act: () -> Unit): Pair<View, GradientDrawable> {
+        val bg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL; setColor(0x22FFFFFF); setStroke(dp(3), Color.TRANSPARENT)
+        }
+        val circle = FrameLayout(this).apply {
+            isFocusable = true; isClickable = true
+            background = bg
+            setPadding(dp(11), dp(11), dp(11), dp(11))
+            addView(Glyph(this@MainActivity, kind), FrameLayout.LayoutParams(MATCH, MATCH))
+            setOnClickListener { act() }
+            setOnFocusChangeListener { v, f ->
+                bg.setStroke(dp(3), if (f) Color.WHITE else Color.TRANSPARENT)
+                val s = if (f) 1.12f else 1f
+                v.animate().scaleX(s).scaleY(s).setDuration(120).start()
+            }
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            clipChildren = false
+            addView(circle, LinearLayout.LayoutParams(dp(46), dp(46)))
+            addView(TextView(this@MainActivity).apply {
+                text = label; textSize = 10f; setTextColor(0xB3FFFFFF.toInt()); gravity = Gravity.CENTER
+                setPadding(0, dp(3), 0, 0)
+            }, LinearLayout.LayoutParams(WRAP, WRAP))
+        }
+        box.layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(6); bottomMargin = dp(6) }
+        return Pair(box, bg)
+    }
+
+    private fun updateRailActive() {
+        homeBg.setColor(if (page == 0) 0xFF1FBAA6.toInt() else 0x22FFFFFF)
+        forBg.setColor(if (page == 1) 0xFF1FBAA6.toInt() else 0x22FFFFFF)
+    }
+
+    private fun setPage(p: Int, focus: Boolean = true) {
+        page = p
+        scroll.visibility = if (p == 0) View.VISIBLE else View.GONE
+        forYou.visibility = if (p == 1) View.VISIBLE else View.GONE
+        updateRailActive()
+        if (p == 1) loadForYou()
+        if (focus && p == 0) dock.getChildAt(0)?.requestFocus()
+    }
+
+    private fun launchPkg(pkg: String) {
+        val i = packageManager.getLeanbackLaunchIntentForPackage(pkg) ?: packageManager.getLaunchIntentForPackage(pkg)
+        if (i != null) startActivity(i)
+    }
+
+    private fun openSettings() {
+        startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    private fun openAccounts() {
+        try {
+            startActivity(Intent(Settings.ACTION_SYNC_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) { openSettings() }
+    }
+
+    private fun openSearch() {
+        try {
+            startActivity(Intent("android.search.action.GLOBAL_SEARCH").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) {
+            try { launchPkg("com.google.android.katniss") } catch (e2: Exception) { }
+        }
+    }
+
+    private fun showInputs() {
+        val tim = getSystemService(Context.TV_INPUT_SERVICE) as TvInputManager
+        val inputs = try { tim.tvInputList.filter { it.isPassthroughInput } } catch (e: Exception) { emptyList() }
+        if (inputs.isEmpty()) {
+            Toast.makeText(this, "No inputs found", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val names = inputs.map {
+            val base = (it.loadCustomLabel(this) ?: it.loadLabel(this)).toString()
+            val off = try { tim.getInputState(it.id) == TvInputManager.INPUT_STATE_DISCONNECTED } catch (e: Exception) { false }
+            if (off) "$base  \u00B7  not connected" else base
+        }.toTypedArray()
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Switch input")
+            .setItems(names) { _, i ->
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(inputs[i].id))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Couldn't switch to that input", Toast.LENGTH_SHORT).show()
+                }
+            }.show()
+    }
+
+    // ---------------------------------------------------------------- For You page
+    private fun sectionTitle(t: String) = TextView(this).apply {
+        text = t; textSize = 14f; setTextColor(0xCCFFFFFF.toInt())
+        setTypeface(typeface, Typeface.BOLD); letterSpacing = 0.05f
+        setPadding(dp(6), 0, 0, dp(2))
+    }
+
+    private fun hScroll() = HorizontalScrollView(this).apply {
+        isHorizontalScrollBarEnabled = false
+        clipChildren = false
+        clipToPadding = false
+        setPadding(0, dp(8), 0, dp(8))
+    }
+
+    private fun buildForYou(): LinearLayout {
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(dp(24), dp(20), dp(24), dp(16))
+            clipChildren = false
+            clipToPadding = false
+            background = GradientDrawable().apply { setColor(0x66101014); cornerRadius = dp(32).toFloat() }
+        }
+        wnHeader = sectionTitle("Continue watching")
+        wnScroll = hScroll()
+        wnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; clipChildren = false }
+        wnScroll.addView(wnRow)
+        val recHeader = sectionTitle("Recently used")
+        val recScroll = hScroll()
+        recRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; clipChildren = false
+        }
+        recScroll.addView(recRow)
+        panel.addView(wnHeader)
+        panel.addView(wnScroll)
+        panel.addView(recHeader)
+        panel.addView(recScroll)
+        forYou = panel
+        return panel
+    }
+
+    private fun posterCard(title: String, onClick: () -> Unit): Pair<FrameLayout, ImageView> {
+        val w = dp(176); val h = dp(99)
+        val ringD = GradientDrawable().apply { cornerRadius = dp(14).toFloat(); setStroke(dp(3), Color.TRANSPARENT) }
+        val box = FrameLayout(this).apply {
+            isFocusable = true; isClickable = true
+            background = ringD
+            setPadding(dp(3), dp(3), dp(3), dp(3))
+        }
+        val inner = FrameLayout(this).apply { outlineProvider = roundOutline(11); clipToOutline = true }
+        val img = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setBackgroundColor(0x33FFFFFF) }
+        inner.addView(img, FrameLayout.LayoutParams(w, h))
+        inner.addView(TextView(this).apply {
+            text = title; textSize = 12f; setTextColor(Color.WHITE)
+            setSingleLine(true); ellipsize = TextUtils.TruncateAt.END
+            setPadding(dp(10), dp(14), dp(10), dp(6))
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x00000000, 0xCC000000.toInt()))
+        }, FrameLayout.LayoutParams(w, WRAP, Gravity.BOTTOM))
+        box.addView(inner, FrameLayout.LayoutParams(w, h))
+        box.setOnClickListener { onClick() }
+        box.setOnFocusChangeListener { v, f ->
+            ringD.setStroke(dp(3), if (f) Color.WHITE else Color.TRANSPARENT)
+            val s = if (f) 1.06f else 1f
+            v.animate().scaleX(s).scaleY(s).setDuration(120).start()
+        }
+        box.layoutParams = LinearLayout.LayoutParams(w + dp(6), h + dp(6)).apply { rightMargin = dp(8) }
+        return Pair(box, img)
+    }
+
+    private fun openWn(item: WnItem) {
+        val u = item.intentUri
+        try {
+            if (u != null) {
+                startActivity(Intent.parseUri(u, Intent.URI_INTENT_SCHEME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } else if (item.pkg != null) {
+                launchPkg(item.pkg)
+            }
+        } catch (e: Exception) {
+            item.pkg?.let { try { launchPkg(it) } catch (e2: Exception) { } }
+        }
+    }
+
+    // Android's "Play Next" / watch-next database. Normal apps are often not allowed to read other apps' rows;
+    // if that is the case this just returns an empty list and the row stays hidden.
+    private fun queryWatchNext(): List<WnItem> {
+        val out = ArrayList<WnItem>()
+        try {
+            val c = contentResolver.query(
+                Uri.parse("content://android.media.tv/watch_next_program"),
+                arrayOf("title", "poster_art_uri", "thumbnail_uri", "intent_uri", "package_name"),
+                null, null, "last_engagement_time_utc_millis DESC"
+            ) ?: return out
+            c.use { cur ->
+                while (cur.moveToNext() && out.size < 10) {
+                    val title = cur.getString(0) ?: continue
+                    val th = cur.getString(2)
+                    val art = if (!th.isNullOrEmpty()) th else cur.getString(1)
+                    out.add(WnItem(title, art, cur.getString(3), cur.getString(4)))
+                }
+            }
+        } catch (e: Exception) { }
+        return out
+    }
+
+    // Needs "usage access", which 03-install-launcher.ps1 grants.
+    private fun queryRecentApps(): List<RecentApp> {
+        val out = ArrayList<RecentApp>()
+        try {
+            val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val now = System.currentTimeMillis()
+            val stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, now - 14L * 86400000L, now) ?: return out
+            val skip = setOf(
+                packageName, "com.android.tv.settings", "com.google.android.tvlauncher",
+                "com.google.android.leanbacklauncher", "com.android.systemui", "com.google.android.katniss"
+            )
+            val pm = packageManager
+            for (s in stats.sortedByDescending { it.lastTimeUsed }.distinctBy { it.packageName }) {
+                if (out.size >= 8) break
+                if (s.lastTimeUsed <= 0 || s.packageName in skip) continue
+                if (pm.getLeanbackLaunchIntentForPackage(s.packageName) == null &&
+                    pm.getLaunchIntentForPackage(s.packageName) == null) continue
+                val label = try { pm.getApplicationLabel(pm.getApplicationInfo(s.packageName, 0)).toString() }
+                            catch (e: Exception) { continue }
+                val icon: Drawable? = try { pm.getApplicationIcon(s.packageName) } catch (e: Exception) { null }
+                out.add(RecentApp(s.packageName, label, icon))
+            }
+        } catch (e: Exception) { }
+        return out
+    }
+
+    private fun loadBitmap(src: String?, targetW: Int): Bitmap? {
+        if (src.isNullOrEmpty()) return null
+        return try {
+            val bytes: ByteArray = if (src.startsWith("http")) {
+                val c = java.net.URL(src).openConnection() as java.net.HttpURLConnection
+                c.connectTimeout = 10000; c.readTimeout = 15000
+                try { c.inputStream.use { it.readBytes() } } finally { c.disconnect() }
+            } else {
+                contentResolver.openInputStream(Uri.parse(src))?.use { it.readBytes() } ?: return null
+            }
+            val b = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, b)
+            var s = 1
+            while (b.outWidth / (s * 2) >= targetW) s *= 2
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = s })
+        } catch (e: Exception) { null }
+    }
+
+    private fun showWatchNext(items: List<WnItem>) {
+        wnRow.removeAllViews()
+        wnImages.clear()
+        val vis = if (items.isEmpty()) View.GONE else View.VISIBLE
+        wnHeader.visibility = vis
+        wnScroll.visibility = vis
+        for (item in items) {
+            val (card, img) = posterCard(item.title) { openWn(item) }
+            wnImages.add(img)
+            wnRow.addView(card)
+        }
+    }
+
+    private fun showRecent(items: List<RecentApp>) {
+        recRow.removeAllViews()
+        if (items.isEmpty()) {
+            recRow.addView(TextView(this).apply {
+                text = "Apps you open will show up here."
+                textSize = 13f; setTextColor(0x99FFFFFF.toInt()); setPadding(dp(6), dp(10), 0, dp(10))
+            })
+        }
+        for (a in items) {
+            recRow.addView(tile(a.label, a.icon, null) { launchPkg(a.pkg) })
+        }
+        if (page == 1) forYou.requestFocus()
+    }
+
+    private fun loadForYou() {
+        Thread {
+            val wn = queryWatchNext()
+            val rec = queryRecentApps()
+            runOnUiThread { showWatchNext(wn); showRecent(rec) }
+            for ((i, item) in wn.withIndex()) {
+                val bmp = loadBitmap(item.art, 480) ?: continue
+                runOnUiThread { if (i < wnImages.size) wnImages[i].setImageBitmap(bmp) }
+            }
+        }.start()
+    }
+
     // ---------------------------------------------------------------- lifecycle
     override fun onResume() {
         super.onResume()
@@ -752,6 +1099,7 @@ class MainActivity : Activity() {
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         allDialog?.dismiss()
+        setPage(0, false)
         scroll.smoothScrollTo(0, 0)
         dock.getChildAt(0)?.requestFocus()
     }
