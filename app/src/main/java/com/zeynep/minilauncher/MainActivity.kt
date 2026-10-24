@@ -1,20 +1,34 @@
 package com.zeynep.minilauncher
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.Dialog
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Outline
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.media.MediaMetadata
+import android.media.session.MediaController
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
+import android.text.TextUtils
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
@@ -26,12 +40,61 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextClock
 import android.widget.TextView
+import android.widget.Toast
 import java.io.File
+
+/** Simple vector-ish icons drawn in code (no font symbols, no image files). */
+private class Glyph(ctx: Context, var kind: Int) : View(ctx) {
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+    override fun onDraw(c: Canvas) {
+        val w = width.toFloat(); val h = height.toFloat()
+        val cx = w / 2; val cy = h / 2; val s = minOf(w, h)
+        p.style = Paint.Style.FILL
+        when (kind) {
+            0 -> { // all apps: 2x2 squares
+                val a = s * 0.2f; val g = s * 0.08f
+                for (i in 0..1) for (j in 0..1) {
+                    val x = if (i == 0) cx - a - g / 2 else cx + g / 2
+                    val y = if (j == 0) cy - a - g / 2 else cy + g / 2
+                    c.drawRoundRect(x, y, x + a, y + a, a * 0.25f, a * 0.25f, p)
+                }
+            }
+            1 -> { // settings: gear
+                p.style = Paint.Style.STROKE; p.strokeWidth = s * 0.1f
+                c.drawCircle(cx, cy, s * 0.17f, p)
+                p.style = Paint.Style.FILL
+                for (i in 0 until 8) {
+                    c.save(); c.rotate(i * 45f, cx, cy)
+                    c.drawRoundRect(cx - s * 0.05f, cy - s * 0.33f, cx + s * 0.05f, cy - s * 0.2f, s * 0.02f, s * 0.02f, p)
+                    c.restore()
+                }
+            }
+            2 -> { // previous
+                c.drawRect(cx - s * 0.22f, cy - s * 0.2f, cx - s * 0.16f, cy + s * 0.2f, p)
+                val t = Path().apply { moveTo(cx + s * 0.22f, cy - s * 0.2f); lineTo(cx + s * 0.22f, cy + s * 0.2f); lineTo(cx - s * 0.12f, cy); close() }
+                c.drawPath(t, p)
+            }
+            3 -> { // play
+                val t = Path().apply { moveTo(cx - s * 0.14f, cy - s * 0.22f); lineTo(cx - s * 0.14f, cy + s * 0.22f); lineTo(cx + s * 0.22f, cy); close() }
+                c.drawPath(t, p)
+            }
+            4 -> { // pause
+                c.drawRoundRect(cx - s * 0.18f, cy - s * 0.2f, cx - s * 0.06f, cy + s * 0.2f, s * 0.02f, s * 0.02f, p)
+                c.drawRoundRect(cx + s * 0.06f, cy - s * 0.2f, cx + s * 0.18f, cy + s * 0.2f, s * 0.02f, s * 0.02f, p)
+            }
+            5 -> { // next
+                c.drawRect(cx + s * 0.16f, cy - s * 0.2f, cx + s * 0.22f, cy + s * 0.2f, p)
+                val t = Path().apply { moveTo(cx - s * 0.22f, cy - s * 0.2f); lineTo(cx - s * 0.22f, cy + s * 0.2f); lineTo(cx + s * 0.12f, cy); close() }
+                c.drawPath(t, p)
+            }
+        }
+    }
+}
 
 class MainActivity : Activity() {
 
-    // Dock order. Apps that are not installed are skipped.
-    private val favs = listOf(
+    // Default dock order. You can change it on the TV (hold OK on an icon); this is only the starting set.
+    private val defaultFavs = listOf(
         "com.google.android.youtube.tv",
         "com.netflix.ninja",
         "com.disney.disneyplus",
@@ -42,10 +105,13 @@ class MainActivity : Activity() {
         "com.digiturk.iq.mobil",
         "com.valvesoftware.steamlink"
     )
+    private val spotifyPkgs = setOf("com.spotify.tv.android", "com.spotify.music")
 
     private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     private val handler = Handler(Looper.getMainLooper())
+    private val prefs by lazy { getSharedPreferences("mh", MODE_PRIVATE) }
+
     private lateinit var bgA: ImageView
     private lateinit var bgB: ImageView
     private lateinit var dock: LinearLayout
@@ -55,6 +121,19 @@ class MainActivity : Activity() {
     private var files: List<File> = emptyList()
     private var idx = 0
     private var allDialog: Dialog? = null
+    private var moving: View? = null
+
+    // now playing
+    private lateinit var nowCard: LinearLayout
+    private lateinit var nowArt: ImageView
+    private lateinit var nowTitle: TextView
+    private lateinit var nowArtist: TextView
+    private lateinit var progFill: View
+    private lateinit var progRest: View
+    private lateinit var playGlyph: Glyph
+    private var controller: MediaController? = null
+    private var mediaMgr: MediaSessionManager? = null
+    private var playing = false
 
     private val rotate = object : Runnable {
         override fun run() {
@@ -65,6 +144,24 @@ class MainActivity : Activity() {
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
+    private fun roundOutline(r: Int) = object : ViewOutlineProvider() {
+        override fun getOutline(v: View, o: Outline) {
+            o.setRoundRect(0, 0, v.width, v.height, dp(r).toFloat())
+        }
+    }
+
+    // ---------------------------------------------------------------- saved dock order
+    private fun favList(): MutableList<String> {
+        val s = prefs.getString("dock", null)
+        return if (s == null) defaultFavs.toMutableList()
+        else s.split(",").filter { it.isNotEmpty() }.toMutableList()
+    }
+
+    private fun saveFavs(l: List<String>) {
+        prefs.edit().putString("dock", l.joinToString(",")).apply()
+    }
+
+    // ---------------------------------------------------------------- UI
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -82,9 +179,9 @@ class MainActivity : Activity() {
         val scrim = View(this)
         scrim.background = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM,
-            intArrayOf(0x00000000, 0xAA000000.toInt())
+            intArrayOf(0x00000000, 0xCC000000.toInt())
         )
-        root.addView(scrim, FrameLayout.LayoutParams(MATCH, dp(360), Gravity.BOTTOM))
+        root.addView(scrim, FrameLayout.LayoutParams(MATCH, dp(420), Gravity.BOTTOM))
 
         credit = TextView(this).apply { textSize = 11f; setTextColor(0x99FFFFFF.toInt()); maxLines = 1 }
         root.addView(credit, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply {
@@ -111,7 +208,8 @@ class MainActivity : Activity() {
             topMargin = dp(40); rightMargin = dp(64)
         })
 
-        // Dock
+        // Bottom stack: now-playing card above the dock
+        nowCard = buildNowCard()
         dock = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -130,84 +228,182 @@ class MainActivity : Activity() {
             clipToPadding = false
             addView(dock, FrameLayout.LayoutParams(WRAP, WRAP))
         }
-        root.addView(scroll, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
-            bottomMargin = dp(48); leftMargin = dp(32); rightMargin = dp(32)
+        val bottom = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(nowCard, LinearLayout.LayoutParams(dp(560), WRAP).apply { bottomMargin = dp(18) })
+            addView(scroll, LinearLayout.LayoutParams(WRAP, WRAP))
+        }
+        root.addView(bottom, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            bottomMargin = dp(40); leftMargin = dp(32); rightMargin = dp(32)
         })
 
         setContentView(root)
     }
 
-    private fun buildDock() {
+    private fun buildDock(focusIdx: Int = -1) {
+        dock.removeAllViews()
         val pm = packageManager
-        for (p in favs) {
+        for (p in favList()) {
             val intent = pm.getLeanbackLaunchIntentForPackage(p) ?: pm.getLaunchIntentForPackage(p) ?: continue
             val label = try { pm.getApplicationLabel(pm.getApplicationInfo(p, 0)).toString() } catch (e: Exception) { p }
             val icon: Drawable? = try { pm.getApplicationIcon(p) } catch (e: Exception) { null }
-            dock.addView(tile(label, icon, null) { startActivity(intent) })
+            val t = tile(label, icon, null) { startActivity(intent) }
+            t.tag = p
+            t.setOnLongClickListener { editMenu(p, label); true }
+            dock.addView(t)
         }
-        dock.addView(tile("All apps", null, "\u22EF") { allApps() })
-        dock.addView(tile("Settings", null, "\u2699") {
+        val all = tile("All apps", null, 0) { allApps(null) }
+        all.setOnLongClickListener { addPicker(); true }
+        dock.addView(all)
+        val set = tile("Settings", null, 1) {
             startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        })
+        }
+        set.setOnLongClickListener { addPicker(); true }
+        dock.addView(set)
+        if (focusIdx >= 0) dock.post {
+            dock.getChildAt(minOf(focusIdx, dock.childCount - 1))?.requestFocus()
+        }
     }
 
-    private fun tile(label: String, icon: Drawable?, glyph: String?, go: () -> Unit): View {
-        val size = dp(66)
+    private fun tile(label: String, icon: Drawable?, glyphKind: Int?, go: () -> Unit): LinearLayout {
+        val size = dp(64)
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             isFocusable = true
             isClickable = true
+            isLongClickable = true
             clipChildren = false
+        }
+        val ringDrawable = GradientDrawable().apply {
+            cornerRadius = dp(21).toFloat(); setStroke(dp(3), Color.TRANSPARENT)
+        }
+        val ring = FrameLayout(this).apply {
+            background = ringDrawable
+            setPadding(dp(3), dp(3), dp(3), dp(3))
         }
         val img: View = if (icon != null) {
             ImageView(this).apply {
                 setImageDrawable(icon)
                 scaleType = ImageView.ScaleType.FIT_CENTER
                 setBackgroundColor(0x22FFFFFF)
-                outlineProvider = object : ViewOutlineProvider() {
-                    override fun getOutline(v: View, o: Outline) {
-                        o.setRoundRect(0, 0, v.width, v.height, dp(18).toFloat())
-                    }
-                }
+                outlineProvider = roundOutline(18)
                 clipToOutline = true
             }
         } else {
-            TextView(this).apply {
-                text = glyph; textSize = 34f; gravity = Gravity.CENTER
-                setTextColor(Color.WHITE)
-                background = GradientDrawable().apply {
-                    cornerRadius = dp(18).toFloat(); setColor(0x55FFFFFF)
-                }
+            FrameLayout(this).apply {
+                background = GradientDrawable().apply { cornerRadius = dp(18).toFloat(); setColor(0x55FFFFFF) }
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                addView(Glyph(this@MainActivity, glyphKind ?: 0), FrameLayout.LayoutParams(MATCH, MATCH))
             }
         }
-        box.addView(img, LinearLayout.LayoutParams(size, size))
+        ring.addView(img, FrameLayout.LayoutParams(size, size))
+        box.addView(ring, LinearLayout.LayoutParams(size + dp(6), size + dp(6)))
         val name = TextView(this).apply {
             text = label; textSize = 12f; setTextColor(Color.WHITE)
             maxLines = 1; gravity = Gravity.CENTER; alpha = 0f
-            ellipsize = android.text.TextUtils.TruncateAt.END
+            ellipsize = TextUtils.TruncateAt.END
             setPadding(0, dp(6), 0, 0)
         }
-        box.addView(name, LinearLayout.LayoutParams(size, WRAP))
+        box.addView(name, LinearLayout.LayoutParams(size + dp(6), WRAP))
         box.setOnFocusChangeListener { v, focused ->
             val s = if (focused) 1.12f else 1f
             v.animate().scaleX(s).scaleY(s).setDuration(120).start()
             name.animate().alpha(if (focused) 1f else 0f).setDuration(120).start()
+            ringDrawable.setStroke(dp(3), if (focused) Color.WHITE else Color.TRANSPARENT)
         }
         box.setOnClickListener { go() }
         box.layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply {
-            leftMargin = dp(4); rightMargin = dp(4)
+            leftMargin = dp(3); rightMargin = dp(3)
         }
         return box
     }
 
-    private fun allApps() {
+    // ---------------------------------------------------------------- edit dock (hold OK)
+    private fun editMenu(pkg: String, label: String) {
+        val items = arrayOf("Move", "Remove from dock", "Add an app\u2026", "Reset dock to default")
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle(label)
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> startMove(pkg)
+                    1 -> removeFav(pkg)
+                    2 -> addPicker()
+                    3 -> { prefs.edit().remove("dock").apply(); buildDock(0) }
+                }
+            }.show()
+    }
+
+    private fun startMove(pkg: String) {
+        for (i in 0 until dock.childCount) {
+            val v = dock.getChildAt(i)
+            if (v.tag == pkg) { moving = v; v.requestFocus() }
+        }
+        Toast.makeText(this, "Move with \u2190 \u2192, press OK to drop", Toast.LENGTH_LONG).show()
+    }
+
+    private fun shift(v: View, d: Int) {
+        val i = dock.indexOfChild(v)
+        val j = i + d
+        var userCount = 0
+        for (k in 0 until dock.childCount) if (dock.getChildAt(k).tag != null) userCount++
+        if (j < 0 || j >= userCount) return
+        dock.removeViewAt(i)
+        dock.addView(v, j)
+        v.requestFocus()
+    }
+
+    private fun endMove() {
+        moving = null
+        val order = ArrayList<String>()
+        for (k in 0 until dock.childCount) (dock.getChildAt(k).tag as? String)?.let { order.add(it) }
+        saveFavs(order)
+        Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show()
+    }
+
+    override fun dispatchKeyEvent(e: KeyEvent): Boolean {
+        val m = moving
+        if (m != null) {
+            if (e.action == KeyEvent.ACTION_DOWN) {
+                when (e.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_LEFT -> shift(m, -1)
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> shift(m, 1)
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_BACK -> endMove()
+                }
+            }
+            return true
+        }
+        return super.dispatchKeyEvent(e)
+    }
+
+    private fun removeFav(pkg: String) {
+        val l = favList()
+        val i = l.indexOf(pkg)
+        l.remove(pkg)
+        saveFavs(l)
+        buildDock(i)
+    }
+
+    private fun addPicker() {
+        allApps { pkg ->
+            val l = favList()
+            if (pkg !in l) l.add(pkg)
+            saveFavs(l)
+            buildDock(l.size - 1)
+        }
+    }
+
+    // ---------------------------------------------------------------- all apps / picker
+    private fun allApps(pick: ((String) -> Unit)?) {
         val pm = packageManager
         val lean = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
         val norm = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val inDock = favList()
         val apps = (pm.queryIntentActivities(lean, 0) + pm.queryIntentActivities(norm, 0))
             .distinctBy { it.activityInfo.packageName }
             .filter { it.activityInfo.packageName != packageName }
+            .filter { pick == null || it.activityInfo.packageName !in inDock }
             .sortedBy { it.loadLabel(pm).toString().lowercase() }
 
         val grid = GridView(this)
@@ -239,18 +435,199 @@ class MainActivity : Activity() {
         val dlg = Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar)
         grid.setOnItemClickListener { _, _, p, _ ->
             val ai = apps[p].activityInfo
-            startActivity(Intent(Intent.ACTION_MAIN).setClassName(ai.packageName, ai.name)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            if (pick != null) {
+                pick(ai.packageName)
+            } else {
+                startActivity(Intent(Intent.ACTION_MAIN).setClassName(ai.packageName, ai.name)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
             dlg.dismiss()
         }
         dlg.setContentView(grid)
         dlg.window?.setBackgroundDrawable(ColorDrawable(0xEE0E1116.toInt()))
         dlg.window?.setLayout(MATCH, MATCH)
         allDialog = dlg
+        if (pick != null) Toast.makeText(this, "Choose an app to add to the dock", Toast.LENGTH_SHORT).show()
         dlg.show()
     }
 
-    // ---- wallpapers: JPG/PNG/WEBP in /sdcard/Android/data/com.zeynep.minilauncher/files/wallpapers ----
+    // ---------------------------------------------------------------- now playing (Spotify)
+    private fun controlButton(kind: Int, act: () -> Unit): FrameLayout {
+        val g = Glyph(this, kind)
+        if (kind == 3) playGlyph = g
+        val bg = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x00FFFFFF) }
+        val b = FrameLayout(this).apply {
+            isFocusable = true; isClickable = true
+            background = bg
+            addView(g, FrameLayout.LayoutParams(MATCH, MATCH))
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            setOnClickListener { act() }
+            setOnFocusChangeListener { v, f ->
+                bg.setColor(if (f) 0x55FFFFFF else 0x00FFFFFF)
+                val s = if (f) 1.12f else 1f
+                v.animate().scaleX(s).scaleY(s).setDuration(120).start()
+            }
+        }
+        b.layoutParams = LinearLayout.LayoutParams(dp(52), dp(52)).apply { leftMargin = dp(4); rightMargin = dp(4) }
+        return b
+    }
+
+    private fun buildNowCard(): LinearLayout {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(16), dp(20), dp(16))
+            visibility = View.GONE
+            background = GradientDrawable().apply { setColor(0x99101014.toInt()); cornerRadius = dp(28).toFloat() }
+        }
+        nowArt = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            isFocusable = true; isClickable = true
+            background = GradientDrawable().apply { setColor(0xFF1DB954.toInt()); cornerRadius = dp(14).toFloat() }
+            outlineProvider = roundOutline(14)
+            clipToOutline = true
+            setOnClickListener {
+                val pkg = controller?.packageName
+                if (pkg != null) {
+                    val i = packageManager.getLeanbackLaunchIntentForPackage(pkg)
+                        ?: packageManager.getLaunchIntentForPackage(pkg)
+                    if (i != null) startActivity(i)
+                }
+            }
+            setOnFocusChangeListener { v, f ->
+                val s = if (f) 1.06f else 1f
+                v.animate().scaleX(s).scaleY(s).setDuration(120).start()
+            }
+        }
+        card.addView(nowArt, LinearLayout.LayoutParams(dp(88), dp(88)))
+
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), 0, dp(8), 0)
+        }
+        col.addView(TextView(this).apply {
+            text = "SPOTIFY"; textSize = 11f; setTextColor(0xFF1ED760.toInt()); letterSpacing = 0.15f
+        })
+        nowTitle = TextView(this).apply {
+            textSize = 20f; setTextColor(Color.WHITE); setTypeface(typeface, Typeface.BOLD)
+            setSingleLine(true); ellipsize = TextUtils.TruncateAt.END
+        }
+        nowArtist = TextView(this).apply {
+            textSize = 15f; setTextColor(0xB3FFFFFF.toInt())
+            setSingleLine(true); ellipsize = TextUtils.TruncateAt.END
+        }
+        col.addView(nowTitle)
+        col.addView(nowArtist)
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable().apply { setColor(0x33FFFFFF); cornerRadius = dp(2).toFloat() }
+        }
+        progFill = View(this).apply {
+            background = GradientDrawable().apply { setColor(0xFF1ED760.toInt()); cornerRadius = dp(2).toFloat() }
+        }
+        progRest = View(this)
+        bar.addView(progFill, LinearLayout.LayoutParams(0, dp(4), 0f))
+        bar.addView(progRest, LinearLayout.LayoutParams(0, dp(4), 1f))
+        col.addView(bar, LinearLayout.LayoutParams(MATCH, dp(4)).apply { topMargin = dp(12) })
+        card.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+
+        card.addView(controlButton(2) { controller?.transportControls?.skipToPrevious() })
+        card.addView(controlButton(3) {
+            val tc = controller?.transportControls
+            if (playing) tc?.pause() else tc?.play()
+        })
+        card.addView(controlButton(5) { controller?.transportControls?.skipToNext() })
+        return card
+    }
+
+    private val sessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { list ->
+        pickController(list)
+    }
+
+    private val mediaCallback = object : MediaController.Callback() {
+        override fun onPlaybackStateChanged(state: PlaybackState?) { updateNow() }
+        override fun onMetadataChanged(metadata: MediaMetadata?) { updateNow() }
+        override fun onSessionDestroyed() { updateNow() }
+    }
+
+    private val tick = object : Runnable {
+        override fun run() {
+            val st = controller?.playbackState
+            val md = controller?.metadata
+            if (st != null && md != null) {
+                val dur = md.getLong(MediaMetadata.METADATA_KEY_DURATION)
+                var pos = st.position
+                if (st.state == PlaybackState.STATE_PLAYING) {
+                    pos += ((SystemClock.elapsedRealtime() - st.lastPositionUpdateTime) * st.playbackSpeed).toLong()
+                }
+                val f = if (dur > 0) (pos.toFloat() / dur).coerceIn(0f, 1f) else 0f
+                (progFill.layoutParams as LinearLayout.LayoutParams).weight = f
+                (progRest.layoutParams as LinearLayout.LayoutParams).weight = 1f - f
+                progFill.requestLayout()
+                progRest.requestLayout()
+            }
+            handler.postDelayed(this, 1000)
+        }
+    }
+
+    private fun startMedia() {
+        try {
+            val msm = getSystemService(MEDIA_SESSION_SERVICE) as MediaSessionManager
+            val cn = ComponentName(this, MediaListener::class.java)
+            msm.addOnActiveSessionsChangedListener(sessionsListener, cn, handler)
+            mediaMgr = msm
+            pickController(msm.getActiveSessions(cn))
+        } catch (e: SecurityException) {
+            // notification-listener access not granted yet (03-install-launcher.ps1 grants it)
+            nowCard.visibility = View.GONE
+        } catch (e: Exception) {
+            nowCard.visibility = View.GONE
+        }
+    }
+
+    private fun stopMedia() {
+        try { mediaMgr?.removeOnActiveSessionsChangedListener(sessionsListener) } catch (e: Exception) { }
+        controller?.unregisterCallback(mediaCallback)
+        controller = null
+        handler.removeCallbacks(tick)
+    }
+
+    private fun pickController(list: List<MediaController>?) {
+        val c = list?.firstOrNull { it.packageName in spotifyPkgs }
+        if (c?.sessionToken != controller?.sessionToken) {
+            controller?.unregisterCallback(mediaCallback)
+            controller = c
+            c?.registerCallback(mediaCallback, handler)
+        }
+        updateNow()
+    }
+
+    private fun updateNow() {
+        val c = controller
+        val st = c?.playbackState
+        val md = c?.metadata
+        if (c == null || st == null || md == null ||
+            st.state == PlaybackState.STATE_NONE || st.state == PlaybackState.STATE_STOPPED) {
+            nowCard.visibility = View.GONE
+            handler.removeCallbacks(tick)
+            return
+        }
+        nowCard.visibility = View.VISIBLE
+        nowTitle.text = md.getString(MediaMetadata.METADATA_KEY_TITLE) ?: ""
+        nowArtist.text = md.getString(MediaMetadata.METADATA_KEY_ARTIST)
+            ?: md.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: ""
+        val art = md.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+            ?: md.getBitmap(MediaMetadata.METADATA_KEY_ART)
+            ?: md.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+        if (art != null) nowArt.setImageBitmap(art) else nowArt.setImageDrawable(null)
+        playing = st.state == PlaybackState.STATE_PLAYING
+        playGlyph.kind = if (playing) 4 else 3
+        playGlyph.invalidate()
+        handler.removeCallbacks(tick)
+        tick.run()
+    }
+
+    // ---------------------------------------------------------------- wallpapers (local + online)
     private fun loadFiles() {
         val dir = getExternalFilesDir("wallpapers")
         files = dir?.listFiles { f -> f.extension.lowercase() in setOf("jpg", "jpeg", "png", "webp") }
@@ -288,7 +665,6 @@ class MainActivity : Activity() {
         front = !front
     }
 
-    // ---- online wallpapers: Wikimedia Commons "Featured pictures" (no account/key, ~once a day) ----
     private val ua = "MiniHome/1.0 (personal-use TV launcher; https://github.com/znyelken/minihome)"
     private val sources = listOf(
         "Featured pictures of landscapes" to 468,
@@ -307,7 +683,6 @@ class MainActivity : Activity() {
     private fun refreshOnline() {
         val dir = getExternalFilesDir("wallpapers") ?: return
         if (File(dir, "offline.flag").exists()) return
-        val prefs = getSharedPreferences("mh", MODE_PRIVATE)
         val have = dir.listFiles { f -> f.name.startsWith("wm_") && f.extension == "jpg" }?.size ?: 0
         val due = System.currentTimeMillis() - prefs.getLong("last_fetch", 0) > 20L * 3600 * 1000
         if (!due && have >= 6) return
@@ -355,18 +730,22 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    // ---------------------------------------------------------------- lifecycle
     override fun onResume() {
         super.onResume()
         loadFiles()
         refreshOnline()
         handler.removeCallbacks(rotate)
         handler.post(rotate)
+        startMedia()
         dock.post { if (currentFocus == null) dock.getChildAt(0)?.requestFocus() }
     }
 
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(rotate)
+        stopMedia()
+        moving = null
     }
 
     override fun onNewIntent(intent: Intent?) {
