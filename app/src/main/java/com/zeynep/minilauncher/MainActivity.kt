@@ -50,6 +50,7 @@ class MainActivity : Activity() {
     private lateinit var bgB: ImageView
     private lateinit var dock: LinearLayout
     private lateinit var scroll: HorizontalScrollView
+    private lateinit var credit: TextView
     private var front = true
     private var files: List<File> = emptyList()
     private var idx = 0
@@ -84,6 +85,11 @@ class MainActivity : Activity() {
             intArrayOf(0x00000000, 0xAA000000.toInt())
         )
         root.addView(scrim, FrameLayout.LayoutParams(MATCH, dp(360), Gravity.BOTTOM))
+
+        credit = TextView(this).apply { textSize = 11f; setTextColor(0x99FFFFFF.toInt()); maxLines = 1 }
+        root.addView(credit, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply {
+            leftMargin = dp(36); bottomMargin = dp(14)
+        })
 
         // Clock + date, top right
         val clock = TextClock(this).apply {
@@ -266,11 +272,14 @@ class MainActivity : Activity() {
         val f = files[idx++ % files.size]
         Thread {
             val bmp = decode(f)
-            if (bmp != null) runOnUiThread { crossfade(bmp) }
+            val t = File(f.path.removeSuffix("." + f.extension) + ".txt")
+            val text = if (t.exists()) t.readText() else ""
+            if (bmp != null) runOnUiThread { crossfade(bmp, text) }
         }.start()
     }
 
-    private fun crossfade(bmp: Bitmap) {
+    private fun crossfade(bmp: Bitmap, text: String) {
+        credit.text = text
         val inV = if (front) bgB else bgA
         val outV = if (front) bgA else bgB
         inV.setImageBitmap(bmp)
@@ -279,9 +288,77 @@ class MainActivity : Activity() {
         front = !front
     }
 
+    // ---- online wallpapers: Wikimedia Commons "Featured pictures" (no account/key, ~once a day) ----
+    private val ua = "MiniHome/1.0 (personal-use TV launcher; https://github.com/znyelken/minihome)"
+    private val sources = listOf(
+        "Featured pictures of landscapes" to 468,
+        "Featured pictures of mountains" to 137,
+        "Featured pictures of coasts" to 54
+    )
+
+    private fun httpGet(u: String): ByteArray {
+        val c = java.net.URL(u).openConnection() as java.net.HttpURLConnection
+        c.setRequestProperty("User-Agent", ua)
+        c.connectTimeout = 15000
+        c.readTimeout = 30000
+        try { return c.inputStream.use { it.readBytes() } } finally { c.disconnect() }
+    }
+
+    private fun refreshOnline() {
+        val dir = getExternalFilesDir("wallpapers") ?: return
+        if (File(dir, "offline.flag").exists()) return
+        val prefs = getSharedPreferences("mh", MODE_PRIVATE)
+        val have = dir.listFiles { f -> f.name.startsWith("wm_") && f.extension == "jpg" }?.size ?: 0
+        val due = System.currentTimeMillis() - prefs.getLong("last_fetch", 0) > 20L * 3600 * 1000
+        if (!due && have >= 6) return
+        Thread {
+            try {
+                val (cat, count) = sources.random()
+                val offset = (0..(count / 50)).random() * 50
+                val q = java.net.URLEncoder.encode("incategory:\"$cat\"", "UTF-8")
+                val url = "https://commons.wikimedia.org/w/api.php?action=query&format=json" +
+                    "&generator=search&gsrnamespace=6&gsrlimit=50&gsroffset=$offset&gsrsearch=$q" +
+                    "&prop=imageinfo&iiprop=url|size|mime&iiurlwidth=1920"
+                val json = org.json.JSONObject(String(httpGet(url), Charsets.UTF_8))
+                val pages = json.optJSONObject("query")?.optJSONObject("pages") ?: return@Thread
+                var got = 0
+                for (k in pages.keys().asSequence().toList().shuffled()) {
+                    if (got >= 8) break
+                    val p = pages.getJSONObject(k)
+                    val ii = p.optJSONArray("imageinfo")?.optJSONObject(0) ?: continue
+                    if (ii.optString("mime") != "image/jpeg") continue
+                    val w = ii.optInt("width"); val h = ii.optInt("height")
+                    if (h == 0 || w.toFloat() / h < 1.4f || w.toFloat() / h > 2.6f) continue
+                    val thumb = ii.optString("thumburl")
+                    if (thumb.isEmpty()) continue
+                    val id = p.optInt("pageid")
+                    val out = File(dir, "wm_$id.jpg")
+                    if (out.exists()) continue
+                    out.writeBytes(httpGet(thumb))
+                    File(dir, "wm_$id.txt").writeText(
+                        p.optString("title").removePrefix("File:").substringBeforeLast('.') +
+                            " \u00B7 Wikimedia Commons")
+                    got++
+                }
+                val all = dir.listFiles { f -> f.name.startsWith("wm_") && f.extension == "jpg" }
+                    ?.sortedBy { it.lastModified() } ?: emptyList()
+                all.dropLast(24).forEach {
+                    it.delete(); File(it.path.removeSuffix(".jpg") + ".txt").delete()
+                }
+                if (got > 0) {
+                    prefs.edit().putLong("last_fetch", System.currentTimeMillis()).apply()
+                    runOnUiThread { loadFiles(); nextWallpaper() }
+                }
+            } catch (e: Exception) {
+                // offline or API hiccup: keep using the photos we already have
+            }
+        }.start()
+    }
+
     override fun onResume() {
         super.onResume()
         loadFiles()
+        refreshOnline()
         handler.removeCallbacks(rotate)
         handler.post(rotate)
         dock.post { if (currentFocus == null) dock.getChildAt(0)?.requestFocus() }
