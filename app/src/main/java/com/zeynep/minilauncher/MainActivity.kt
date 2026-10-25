@@ -306,7 +306,6 @@ class MainActivity : Activity() {
         })
 
         // Left rail
-        val acc = railItem(10, "Account") { openAccounts() }
         val srch = railItem(6, "Search") { openSearch() }
         val home = railItem(7, "Home") { dock.getChildAt(0)?.requestFocus() }
         val inp = railItem(9, "Inputs") { showInputs() }
@@ -317,10 +316,10 @@ class MainActivity : Activity() {
         val rail = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(8), dp(12), dp(8), dp(12))
+            setPadding(dp(10), dp(12), dp(10), dp(12))
             clipChildren = false
             background = GradientDrawable().apply { setColor(0x88101014.toInt()); cornerRadius = dp(34).toFloat() }
-            addView(acc.first); addView(srch.first); addView(home.first)
+            addView(srch.first); addView(home.first)
             addView(inp.first); addView(cls.first); addView(set.first)
         }
         root.addView(rail, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.START or Gravity.CENTER_VERTICAL).apply {
@@ -831,10 +830,8 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(12), dp(12), dp(12))
             addView(Glyph(this@MainActivity, kind), FrameLayout.LayoutParams(MATCH, MATCH))
             setOnClickListener { act() }
-            setOnFocusChangeListener { v, f ->
+            setOnFocusChangeListener { _, f ->
                 bg.setStroke(dp(3), if (f) Color.WHITE else Color.TRANSPARENT)
-                val s = if (f) 1.12f else 1f
-                v.animate().scaleX(s).scaleY(s).setDuration(120).start()
             }
         }
         val box = LinearLayout(this).apply {
@@ -909,12 +906,6 @@ class MainActivity : Activity() {
 
     private fun openSettings() {
         startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-    }
-
-    private fun openAccounts() {
-        try {
-            startActivity(Intent(Settings.ACTION_SYNC_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        } catch (e: Exception) { openSettings() }
     }
 
     private fun openSearch() {
