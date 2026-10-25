@@ -237,6 +237,13 @@ class MainActivity : Activity() {
         )
         root.addView(scrim, FrameLayout.LayoutParams(MATCH, dp(420), Gravity.BOTTOM))
 
+        val topScrim = View(this)
+        topScrim.background = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(0x99000000.toInt(), 0x00000000)
+        )
+        root.addView(topScrim, FrameLayout.LayoutParams(MATCH, dp(190), Gravity.TOP))
+
         credit = TextView(this).apply { textSize = 11f; setTextColor(0x99FFFFFF.toInt()); maxLines = 1 }
         root.addView(credit, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply {
             leftMargin = dp(36); bottomMargin = dp(14)
@@ -246,10 +253,12 @@ class MainActivity : Activity() {
         val clock = TextClock(this).apply {
             format12Hour = "HH:mm"; format24Hour = "HH:mm"
             textSize = 44f; setTextColor(Color.WHITE); gravity = Gravity.END
+            setShadowLayer(10f, 0f, 2f, 0x99000000.toInt())
         }
         val date = TextClock(this).apply {
             format12Hour = "EEEE d MMMM"; format24Hour = "EEEE d MMMM"
             textSize = 18f; setTextColor(0xCCFFFFFF.toInt()); gravity = Gravity.END
+            setShadowLayer(8f, 0f, 2f, 0x99000000.toInt())
         }
         date.setSingleLine(true)
         val clockBox = LinearLayout(this).apply {
@@ -288,8 +297,12 @@ class MainActivity : Activity() {
             addView(nowCard, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
             addView(scroll, LinearLayout.LayoutParams(WRAP, WRAP))
         }
-        root.addView(bottom, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
-            bottomMargin = dp(40); leftMargin = dp(120); rightMargin = dp(32)
+        val content = FrameLayout(this)
+        content.addView(bottom, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            bottomMargin = dp(40)
+        })
+        root.addView(content, FrameLayout.LayoutParams(MATCH, MATCH).apply {
+            leftMargin = dp(120); rightMargin = dp(32)
         })
 
         // Left rail
@@ -306,7 +319,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(dp(8), dp(12), dp(8), dp(12))
             clipChildren = false
-            background = GradientDrawable().apply { setColor(0x66101014); cornerRadius = dp(34).toFloat() }
+            background = GradientDrawable().apply { setColor(0x88101014.toInt()); cornerRadius = dp(34).toFloat() }
             addView(acc.first); addView(srch.first); addView(home.first)
             addView(inp.first); addView(cls.first); addView(set.first)
         }
@@ -323,7 +336,7 @@ class MainActivity : Activity() {
         val shown = favList().filter {
             pm.getLeanbackLaunchIntentForPackage(it) != null || pm.getLaunchIntentForPackage(it) != null
         }
-        val availPx = resources.displayMetrics.widthPixels - dp(120) - dp(32) - dp(48)
+        val availPx = resources.displayMetrics.widthPixels - dp(120) - dp(32) - dp(60)
         val per = minOf(dp(84), availPx / (shown.size + 1))
         iconPx = maxOf(dp(40), per - dp(12))
         for (p in shown) {
