@@ -118,6 +118,18 @@ private class Glyph(ctx: Context, var kind: Int) : View(ctx) {
                 c.drawCircle(cx, cy - s * 0.1f, s * 0.1f, p)
                 c.drawArc(RectF(cx - s * 0.2f, cy + s * 0.04f, cx + s * 0.2f, cy + s * 0.44f), 180f, 180f, true, p)
             }
+            11 -> { // switch: two opposite arrows
+                p.style = Paint.Style.STROKE; p.strokeWidth = s * 0.07f; p.strokeCap = Paint.Cap.ROUND
+                c.drawLine(cx - s * 0.22f, cy - s * 0.1f, cx + s * 0.1f, cy - s * 0.1f, p)
+                c.drawLine(cx + s * 0.22f, cy + s * 0.1f, cx - s * 0.1f, cy + s * 0.1f, p)
+                p.style = Paint.Style.FILL
+                c.drawPath(Path().apply {
+                    moveTo(cx + s * 0.27f, cy - s * 0.1f); lineTo(cx + s * 0.13f, cy - s * 0.21f); lineTo(cx + s * 0.13f, cy + s * 0.01f); close()
+                }, p)
+                c.drawPath(Path().apply {
+                    moveTo(cx - s * 0.27f, cy + s * 0.1f); lineTo(cx - s * 0.13f, cy - s * 0.01f); lineTo(cx - s * 0.13f, cy + s * 0.21f); close()
+                }, p)
+            }
             5 -> { // next
                 c.drawRect(cx + s * 0.16f, cy - s * 0.2f, cx + s * 0.22f, cy + s * 0.2f, p)
                 val t = Path().apply { moveTo(cx - s * 0.22f, cy - s * 0.2f); lineTo(cx - s * 0.22f, cy + s * 0.2f); lineTo(cx + s * 0.12f, cy); close() }
@@ -161,6 +173,7 @@ class MainActivity : Activity() {
 
     // dock tile size in px, computed so every tile fits on screen
     private var iconPx = 0
+    private var routed = false
     private lateinit var homeBg: GradientDrawable
 
     // now playing
@@ -204,6 +217,7 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- UI
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (routeIfClassic(intent)) { routed = true; finish(); return }
 
         val root = FrameLayout(this)
         root.background = GradientDrawable(
@@ -283,6 +297,7 @@ class MainActivity : Activity() {
         val srch = railItem(6, "Search") { openSearch() }
         val home = railItem(7, "Home") { dock.getChildAt(0)?.requestFocus() }
         val inp = railItem(9, "Inputs") { showInputs() }
+        val cls = railItem(11, "Classic") { switchToClassic() }
         val set = railItem(1, "Settings") { openSettings() }
         homeBg = home.second
         homeBg.setColor(0xFF1FBAA6.toInt())
@@ -293,7 +308,7 @@ class MainActivity : Activity() {
             clipChildren = false
             background = GradientDrawable().apply { setColor(0x66101014); cornerRadius = dp(34).toFloat() }
             addView(acc.first); addView(srch.first); addView(home.first)
-            addView(inp.first); addView(set.first)
+            addView(inp.first); addView(cls.first); addView(set.first)
         }
         root.addView(rail, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.START or Gravity.CENTER_VERTICAL).apply {
             leftMargin = dp(24)
@@ -819,13 +834,64 @@ class MainActivity : Activity() {
                 setPadding(0, dp(3), 0, 0)
             }, LinearLayout.LayoutParams(WRAP, WRAP))
         }
-        box.layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(5); bottomMargin = dp(5) }
+        box.layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(4); bottomMargin = dp(4) }
         return Pair(box, bg)
     }
 
     private fun launchPkg(pkg: String) {
         val i = packageManager.getLeanbackLaunchIntentForPackage(pkg) ?: packageManager.getLaunchIntentForPackage(pkg)
         if (i != null) startActivity(i)
+    }
+
+    // ---- Classic (original) home <-> Mini Home --------------------------------------------
+    // Classic mode: pressing Home on the remote still reaches this app (it is the default home),
+    // which immediately hands over to the original home screen. Opening "Mini Home" from the
+    // original interface's Apps row (not via the Home key) switches back.
+    private fun classicHomeIntent(): Intent? {
+        val homes = packageManager
+            .queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)
+            .map { it.activityInfo }
+            .filter { it.packageName != packageName }
+        val pick = homes.firstOrNull { it.packageName == "com.google.android.tvlauncher" }
+            ?: homes.firstOrNull { it.packageName == "com.google.android.leanbacklauncher" }
+            ?: homes.firstOrNull()
+            ?: return null
+        return Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            .setClassName(pick.packageName, pick.name)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+
+    private fun launchClassic(): Boolean {
+        val i = classicHomeIntent() ?: return false
+        return try { startActivity(i); true } catch (e: Exception) { false }
+    }
+
+    private fun routeIfClassic(i: Intent?): Boolean {
+        val fromHomeKey = i?.hasCategory(Intent.CATEGORY_HOME) == true
+        if (!fromHomeKey) {
+            prefs.edit().putBoolean("classic", false).apply()   // opened from an Apps row: back to Mini Home
+            return false
+        }
+        if (prefs.getBoolean("classic", false)) {
+            if (launchClassic()) return true
+            prefs.edit().putBoolean("classic", false).apply()   // original home not available: stay here
+        }
+        return false
+    }
+
+    private fun switchToClassic() {
+        if (classicHomeIntent() == null) {
+            Toast.makeText(this, "Couldn't find the original home screen", Toast.LENGTH_LONG).show()
+            return
+        }
+        prefs.edit().putBoolean("classic", true).apply()
+        if (launchClassic()) {
+            Toast.makeText(this, "Classic home. Open Mini Home from Apps to switch back.", Toast.LENGTH_LONG).show()
+            finish()
+        } else {
+            prefs.edit().putBoolean("classic", false).apply()
+            Toast.makeText(this, "Couldn't open the original home screen", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun openSettings() {
@@ -873,6 +939,7 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- lifecycle
     override fun onResume() {
         super.onResume()
+        if (routed) return
         loadFiles()
         refreshOnline()
         handler.removeCallbacks(rotate)
@@ -883,6 +950,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
+        if (routed) return
         handler.removeCallbacks(rotate)
         stopMedia()
         moving = null
@@ -890,6 +958,7 @@ class MainActivity : Activity() {
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
+        if (routeIfClassic(intent)) { routed = true; finish(); return }
         allDialog?.dismiss()
         scroll.smoothScrollTo(0, 0)
         dock.getChildAt(0)?.requestFocus()

@@ -5,6 +5,8 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <application
         android:label="Mini Home"
+        android:icon="@drawable/icon"
+        android:banner="@drawable/banner"
         android:allowBackup="false"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
         <activity
